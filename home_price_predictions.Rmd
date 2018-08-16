@@ -1,0 +1,353 @@
+---
+title: "DA6813 Final Exam"
+author: "Sercan Demir"
+date: "August 12, 2018"
+output: word_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE)
+set.seed(123)
+```
+
+## Import Data
+
+```{r echo=TRUE,warning=FALSE}
+build_data <- read.csv('final_exam_train.csv')
+results_data <- read.csv('final_exam_test.csv')
+
+```
+
+
+```{r}
+library(e1071)
+library(caret)
+library(lattice)
+library(corrplot)
+library(moments)
+library(MASS)
+library(ggplot2)
+
+```
+
+## Data Preprocessing
+
+```{r echo=TRUE}
+
+#removing the ID column
+data<-build_data[,-1]
+resultsID<-results_data[,1]
+results_data<-results_data[,-1]
+
+#saving the value column in a seperate vector.
+value<-data$value
+data<-data[,-29]
+
+#checking for missing values. There are no missing values.
+sum(is.na(data))
+
+#checking the distribution of the response variable. It does not look skewed.
+histogram(value)
+
+```
+
+
+
+
+
+```{r}
+#combining train and test set (will be separated after preprocessing)
+combined<-rbind(data,results_data)
+
+
+
+#looking for skewed variables.
+skewValues <- apply(combined, 2, skewness)
+## Keep only features that exceed a threshold (0.75) for skewness
+skewValues <- skewValues[abs(skewValues) > 0.75]
+
+## Transform skewed features with boxcox transformation
+for (x in names(skewValues)) {
+    bc = BoxCoxTrans(combined[[x]], lambda = 0.15)
+    combined[[x]] = predict(bc, combined[[x]])
+}
+
+
+
+
+
+
+
+#looking for near zero variances
+
+NZV<-nearZeroVar(combined)
+transDataNZV<-combined[,-NZV]
+
+#observing the correlated variables.
+correlations = cor(transDataNZV)
+corrplot(correlations,order = "hclust")
+
+#removing highly correlated variables. In this case eff_depth and eff_front are higly correlated.eff_depth is removed.
+highCorr = findCorrelation(correlations, cutoff = 0.7)
+
+filteredDataPre <- transDataNZV[, -highCorr]
+
+filteredData <- filteredDataPre[1:608, ]
+results_dataFiltered <- filteredDataPre[609:613, ]
+
+
+#distributions after preprocessing. I will center and scale during model building using caret package.
+# par(mfrow=c(2,2))
+# for (i in 1:ncol(filteredData))
+# {
+#   hist(filteredData[,i],xlab=colnames(filteredData)[i])
+# }
+
+```
+
+## Sample Selection - Generate a Training and Test Set
+
+```{r echo=TRUE}
+
+set.seed(123)
+trainingRows <- createDataPartition(value,p = .70, list= FALSE)
+
+trainX <- filteredData[trainingRows, ]
+trainY<-value[trainingRows]
+testX <- filteredData[-trainingRows, ]
+testY<-value[-trainingRows]
+
+
+```
+
+## Model Building / Training / Tuning
+
+setting up the resampling for the cross validation. I will use the same control for each model
+```{r}
+ctrl <- trainControl(method = "repeatedcv", number = 10)
+```
+
+
+Model- 1 Linear Regression
+```{r echo=TRUE}
+set.seed(100)
+lmFit1 <- train(x = trainX, y = trainY,  method = "lm", trControl = ctrl,preProcess = c("center", "scale"))
+lmFit1
+
+
+```
+
+Model-2 Ridge Regression
+
+```{r}
+
+ridgeGrid <- data.frame(.lambda = seq(0, .1, length = 20))  
+set.seed(100)
+ridgeRegFit <- train(trainX, trainY, 
+                     method = "ridge",
+                    trControl = ctrl,
+                    tuneGrid = ridgeGrid,
+                    preProc = c("center", "scale"))
+ridgeRegFit
+```
+
+Model-3 Lasso Regression
+```{r}
+#Lasso
+#Since lasso also performs dimentionality reduction . I will include higly correlated variables and let Lasso handle it . 
+transDataNZV<-transDataNZV[1:608, ]
+trainXL <- transDataNZV[trainingRows, ]
+
+testXL <- transDataNZV[-trainingRows, ]
+
+
+enetGrid <- expand.grid(.lambda = c(0, 0.01, .1),.fraction = seq(.05, 1, length = 10))
+set.seed(100)
+enetTune <-  train(trainXL, trainY, 
+                     method = "enet",
+                    trControl = ctrl,
+                    tuneGrid = enetGrid,
+                    preProc = c("center", "scale"))
+enetTune
+plot(enetTune)
+
+
+```
+
+Model-4 PLS
+
+
+
+```{r}
+
+set.seed(100)
+plsTune <- train(x = trainXL, y =trainY,
+                  method = "pls",
+                 tuneLength = 25,
+                  trControl = ctrl,
+                 preProcess = c("center", "scale")
+                 )
+plsTune
+```
+
+Model-5 PCR
+```{r}
+set.seed(100)
+PCRfit<-train(x =trainXL, y =trainY,
+              method="pcr",
+              trControl=ctrl,
+              preProcess = c("center", "scale"),
+              tuneLength=25
+              )
+
+PCRfit
+```
+
+
+Model-6 Random Forest
+```{r}
+set.seed(100)
+rfreg <- train(x=trainXL,y=trainY,
+               method = "rf",
+               ntree = 1000,
+               trControl = ctrl,
+               tuneGrid = data.frame(mtry = 6))
+rfreg
+
+```
+
+Model-7 Gradient Boosting Machine
+
+
+```{r}
+#I tried this model with the filtered data however I am getting better r^2 and rmse with the raw data on the test data set(also on the CV). Therefore I built gbm using raw data.  
+
+trainXgb<- data[trainingRows, ]
+testXgb <- data[-trainingRows, ]
+
+
+set.seed(222)
+gbmFit <- train(trainXgb, trainY, method = "gbm", metric = "RMSE", maximize = FALSE, 
+    trControl = ctrl, tuneGrid = expand.grid(n.trees = (2:10) * 
+        50, interaction.depth = c(3:5), shrinkage = c(0.05), n.minobsinnode = c(10)), verbose = FALSE)
+gbmFit
+```
+
+## Model Selection
+Comparing the cross validated models.
+
+Outcome-looking at the summary of the cross validated models(below table):
+gbm has the lowest mean RMSE =8886.365  
+gbm has the highest mean Rsquared= 0.9320394
+
+
+```{r echo=TRUE}
+options(scipen=999)
+
+resamp <- resamples(list(LinearRegression = lmFit1, RidgeRegression=ridgeRegFit,PLS=plsTune,PCR=PCRfit,Lasso=enetTune, GradientBoostingMachine=gbmFit,RandomForest=rfreg)) 
+summary(resamp)
+bwplot(resamp)
+```
+## What is the expected accuracy of your approach (R^2 / RMSE / MAE etc.)?
+
+Predicting the test set using the cross validated models. Even though I know gbm is producing the best CV rmse and rsquared , I would still like to see how all the models are performing on the test data set. 
+Outcome :
+Gradient boosting machine producing the best results on the test data set.
+Rsquared= 0.9214313
+RMSE = 9527.035
+
+
+
+
+Model- 1 Linear Regression- Test Set Prediction
+```{r}
+lmPred<-predict(lmFit1,newdata = testX)
+r2_lm = cor(lmPred,testY,method="pearson")^2
+r2_lm
+rmse_lm = sqrt( mean( (lmPred-testY)^2 ) )
+rmse_lm 
+
+       
+```
+Model-2 Ridge Regression- Test Set Prediction
+```{r}
+RidgePred<-predict(ridgeRegFit,newdata = testX)
+r2_Ridge = cor(RidgePred,testY,method="pearson")^2
+r2_Ridge
+rmse_Ridge = sqrt( mean( (RidgePred-testY)^2 ) )
+rmse_Ridge 
+       
+```
+
+
+
+Model-3 Lasso Regression- Test Set Prediction
+```{r}
+LassoPred<-predict(enetTune,newdata = testXL)
+r2_Lasso = cor(LassoPred,testY,method="pearson")^2
+r2_Lasso
+rmse_Lasso = sqrt( mean( (LassoPred-testY)^2 ) )
+rmse_Lasso 
+
+
+```
+
+
+
+Model-4 PLS- Test Set Prediction
+
+```{r}
+plsPred<-predict(plsTune,newdata = testXL)
+
+r2_pls = cor(plsPred,testY,method="pearson")^2
+r2_pls
+
+rmse_pls = sqrt( mean( (plsPred-testY)^2 ) )
+rmse_pls 
+
+```
+
+
+Model-5 PCR- Test Set Prediction
+
+```{r}
+pcrPred<-predict(PCRfit,newdata = testXL)
+r2_pcr = cor(pcrPred,testY,method="pearson")^2
+r2_pcr
+rmse_pcr = sqrt( mean( (pcrPred-testY)^2 ) )
+rmse_pcr 
+```
+
+Model-6 Random Forest- Test Set Prediction
+```{r}
+rfPred<-predict(rfreg,newdata = testXgb)
+r2_rf = cor(rfPred,testY,method="pearson")^2
+r2_rf
+rmse_rf = sqrt( mean( (rfPred-testY)^2 ) )
+rmse_rf 
+```
+
+
+
+Model-7 Gradient Boosting Machine- Test Set Prediction
+```{r echo=TRUE}
+gbmPred<-predict(gbmFit,newdata = testXgb)
+r2_gbm = cor(gbmPred,testY,method="pearson")^2
+r2_gbm
+rmse_gbm = sqrt( mean( (gbmPred-testY)^2 ) )
+rmse_gbm 
+```
+
+
+
+## Predict the House Values for `results_data` 
+
+```{r echo=TRUE}
+
+resultsPredGbm<-predict(gbmFit,newdata =results_data)
+
+
+df<-as.data.frame(cbind(resultsID,resultsPredGbm))
+
+df
+```
